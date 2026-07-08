@@ -1,0 +1,3 @@
+Date,Type,Category,Item,Amount,Currency,Exchange Rate,Transaction Nature
+2026-01-01,Income,Client Payment,Legacy consulting income,1500,USD,1,Operating
+2026-01-02,Expense,Software,Legacy software expense,89,USD,1,Operating
