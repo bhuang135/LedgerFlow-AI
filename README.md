@@ -1,48 +1,59 @@
-# LedgerPro AI Commercial Bookkeeping
+# LedgerFlow AI — Cloud-Persistent Bookkeeping App
 
-QuickBooks/Xero-style commercial bookkeeping app with user account management, transaction-level currency fields, manual entry, Gemini receipt/screenshot capture, data cleaning, reports, exports, and strict multilingual switching.
+LedgerFlow AI is a QuickBooks/Xero-style Streamlit bookkeeping app with strict multilingual UI support and Google Sheets cloud persistence.
 
-## Latest Fixes
+## Core Features
 
-- Transaction deletion is now permanent. Legacy/demo rows will not regenerate after deletion.
-- Added a one-time legacy migration marker so bundled sample CSV data is not re-imported after cleanup.
-- Duplicate transactions are now blocked instead of being saved after a warning.
-- The Data Cleaning Center supports reviewing, editing, and deleting transaction details for the active user account.
-- Runtime data files and temporary images are excluded from GitHub by `.gitignore`.
+- User account management with duplicate-name validation
+- Manual transaction entry
+- Receipt photo / screenshot capture with Gemini AI recognition
+- AI-suggested income/expense treatment with final user review
+- Multi-currency transaction fields and exchange-rate-to-base-currency tracking
+- Transaction nature, payment method, review status, tax flag, attachment reference, and notes
+- Data Cleaning Center for editing and deleting transactions
+- Dashboard, P&L, cash flow, category breakdown, close readiness, and audit log
+- Strict language switching: Traditional Chinese, Simplified Chinese, and English
+- Google Sheets cloud persistence for accounts, transactions, and audit logs
 
-## Transaction Entry Sources
+## Cloud Persistence
 
-1. Manual entry
-2. Mobile receipt photo capture or receipt image upload
-3. Income/expense screenshot upload
+When deployed to Streamlit Cloud, local CSV files can reset after restart or redeploy. This version stores operational bookkeeping records in Google Sheets when secrets are configured.
 
-Gemini API is used only after the user enters an API key in the sidebar. The key is session-only and is cleared whenever the active user account changes. After a confirmed transaction is saved, temporary image files are deleted.
+The app writes these worksheets automatically:
 
-## Strict Language Switching
+- `user_accounts`
+- `transactions`
+- `audit_log`
 
-The app uses the left sidebar for language selection.
+## Streamlit Secrets
 
-- Traditional Chinese: all application control text is Traditional Chinese.
-- Simplified Chinese: all application control text is Simplified Chinese.
-- English: all application control text is English.
+Create a Google Sheet, share it with your Google Cloud service account email, then add secrets in Streamlit Cloud:
 
-## Main File
+```toml
+[google_sheets]
+spreadsheet_id = "YOUR_GOOGLE_SHEET_ID"
 
-```text
-app.py
+[gcp_service_account]
+type = "service_account"
+project_id = "your-project-id"
+private_key_id = "your-private-key-id"
+private_key = "-----BEGIN PRIVATE KEY-----\nYOUR_PRIVATE_KEY\n-----END PRIVATE KEY-----\n"
+client_email = "your-service-account@your-project.iam.gserviceaccount.com"
+client_id = "your-client-id"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-project.iam.gserviceaccount.com"
+universe_domain = "googleapis.com"
 ```
 
-## Local Run
+Do not commit real secrets to GitHub.
+
+## Run Locally
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Streamlit Cloud
-
-Use:
-
-```text
-Main file path: app.py
-```
+Local CSV mode is still supported for development, but production persistence should use Google Sheets.

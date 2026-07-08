@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 import json
+import os
 import re
 from datetime import date, datetime, timedelta
 from io import BytesIO, StringIO
@@ -11,6 +12,13 @@ from typing import Dict, List, Optional
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except Exception:  # Google Sheets support is optional for local development.
+    gspread = None
+    Credentials = None
 
 from translations import (
     ACCOUNT_LABELS,
@@ -38,6 +46,14 @@ TEMP_DIR = DATA_DIR / "temp_images"
 TEMP_DIR.mkdir(exist_ok=True)
 LEGACY_FILE = APP_DIR / "finance_ledger.csv"
 MIGRATION_SENTINEL = DATA_DIR / ".legacy_migration_completed"
+
+GOOGLE_SHEETS_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+GSHEET_USERS_TAB = "user_accounts"
+GSHEET_TRANSACTIONS_TAB = "transactions"
+GSHEET_AUDIT_TAB = "audit_log"
 
 USER_COLUMNS = [
     "user_id",
@@ -263,6 +279,18 @@ def render_language_sidebar() -> str:
             help=t('api_key_account_only', selected_lang),
         )
         st.divider()
+        st.markdown(f"### ☁️ {t('cloud_storage', selected_lang)}")
+        if google_sheets_enabled():
+            st.success(t('cloud_connected', selected_lang))
+            sid = google_spreadsheet_id() or ''
+            st.caption(f"{t('spreadsheet_id', selected_lang)}: {sid[:8]}…")
+        else:
+            st.warning(t('cloud_not_connected', selected_lang))
+            err = st.session_state.get('cloud_storage_error', '')
+            if err:
+                st.caption(err[:220])
+            st.caption(t('cloud_setup_hint', selected_lang))
+        st.divider()
         st.caption(SIDEBAR_APP_NOTE[selected_lang])
     if selected_lang != current_lang:
         st.session_state.lang = selected_lang
@@ -274,46 +302,253 @@ def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def default_user_df() -> pd.DataFrame:
+    return pd.DataFrame([
+        {
+            "user_id": "USER-DEFAULT",
+            "display_name": "Demo Business",
+            "entity_type": "Client Account",
+            "email": "",
+            "country_region": "United States",
+            "tax_id": "",
+            "industry": "Small Business",
+            "base_currency": "USD",
+            "opening_balance": 0.0,
+            "notes": "Default demo account",
+            "created_at": now_str(),
+            "updated_at": now_str(),
+        }
+    ], columns=USER_COLUMNS)
+
+
+def _secret_section(name: str) -> Optional[dict]:
+    try:
+        if name in st.secrets:
+            return dict(st.secrets[name])
+    except Exception:
+        return None
+    return None
+
+
+def _secret_value(*names: str) -> Optional[str]:
+    for name in names:
+        try:
+            value = st.secrets.get(name)
+            if value:
+                return str(value)
+        except Exception:
+            pass
+    return None
+
+
+def google_credentials_info() -> Optional[dict]:
+    service_account = _secret_section("gcp_service_account") or _secret_section("google_service_account")
+    if service_account:
+        info = dict(service_account)
+        if "private_key" in info and isinstance(info["private_key"], str):
+            info["private_key"] = info["private_key"].replace("\\n", "\n")
+        return info
+
+    raw_json = _secret_value("gcp_service_account_json", "GOOGLE_SERVICE_ACCOUNT_JSON") or os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if raw_json:
+        try:
+            info = json.loads(raw_json)
+            if "private_key" in info and isinstance(info["private_key"], str):
+                info["private_key"] = info["private_key"].replace("\\n", "\n")
+            return info
+        except Exception:
+            return None
+    return None
+
+
+def google_spreadsheet_id() -> Optional[str]:
+    gs = _secret_section("google_sheets") or _secret_section("gsheets")
+    if gs:
+        for key in ["spreadsheet_id", "sheet_id", "id"]:
+            if gs.get(key):
+                return str(gs[key]).strip()
+    return (
+        _secret_value("google_sheet_id", "GOOGLE_SHEET_ID", "spreadsheet_id")
+        or os.environ.get("GOOGLE_SHEET_ID")
+    )
+
+
+def is_google_sheets_configured() -> bool:
+    return gspread is not None and Credentials is not None and bool(google_credentials_info()) and bool(google_spreadsheet_id())
+
+
+@st.cache_resource(show_spinner=False)
+def _cached_spreadsheet(credentials_json: str, spreadsheet_id: str):
+    info = json.loads(credentials_json)
+    creds = Credentials.from_service_account_info(info, scopes=GOOGLE_SHEETS_SCOPES)
+    client = gspread.authorize(creds)
+    return client.open_by_key(spreadsheet_id)
+
+
+def get_google_spreadsheet():
+    if not is_google_sheets_configured():
+        return None
+    try:
+        info = google_credentials_info()
+        spreadsheet_id = google_spreadsheet_id()
+        credentials_json = json.dumps(info, sort_keys=True)
+        st.session_state["cloud_storage_error"] = ""
+        return _cached_spreadsheet(credentials_json, spreadsheet_id)
+    except Exception as exc:
+        st.session_state["cloud_storage_error"] = str(exc)
+        return None
+
+
+def google_sheets_enabled() -> bool:
+    return get_google_spreadsheet() is not None
+
+
+def get_or_create_worksheet(title: str, columns: List[str]):
+    spreadsheet = get_google_spreadsheet()
+    if spreadsheet is None:
+        return None
+    try:
+        worksheet = spreadsheet.worksheet(title)
+    except Exception:
+        worksheet = spreadsheet.add_worksheet(title=title, rows=1000, cols=max(20, len(columns)))
+
+    try:
+        values = worksheet.get_all_values()
+    except Exception:
+        values = []
+
+    if not values:
+        try:
+            worksheet.update(values=[columns], range_name="A1")
+        except TypeError:
+            worksheet.update("A1", [columns])
+    else:
+        header = values[0]
+        missing = [col for col in columns if col not in header]
+        if missing:
+            new_header = header + missing
+            try:
+                worksheet.update(values=[new_header], range_name="A1")
+            except TypeError:
+                worksheet.update("A1", [new_header])
+    return worksheet
+
+
+def read_google_sheet(title: str, columns: List[str]) -> Optional[pd.DataFrame]:
+    worksheet = get_or_create_worksheet(title, columns)
+    if worksheet is None:
+        return None
+    try:
+        records = worksheet.get_all_records(default_blank="")
+        df = pd.DataFrame(records)
+    except Exception as exc:
+        st.session_state["cloud_storage_error"] = str(exc)
+        return None
+    for col in columns:
+        if col not in df.columns:
+            df[col] = ""
+    return df[columns] if not df.empty else pd.DataFrame(columns=columns)
+
+
+def write_google_sheet(title: str, columns: List[str], df: pd.DataFrame) -> bool:
+    worksheet = get_or_create_worksheet(title, columns)
+    if worksheet is None:
+        return False
+    output = df.copy()
+    for col in columns:
+        if col not in output.columns:
+            output[col] = ""
+    output = output[columns].fillna("")
+    for col in output.columns:
+        output[col] = output[col].apply(lambda x: x.isoformat() if hasattr(x, "isoformat") else x)
+    values = [columns] + output.astype(str).values.tolist()
+    try:
+        worksheet.clear()
+        try:
+            worksheet.update(values=values, range_name="A1", value_input_option="USER_ENTERED")
+        except TypeError:
+            worksheet.update("A1", values, value_input_option="USER_ENTERED")
+        return True
+    except Exception as exc:
+        st.session_state["cloud_storage_error"] = str(exc)
+        return False
+
+
+def save_audit_log(df: pd.DataFrame) -> None:
+    output = df.copy()
+    for col in AUDIT_COLUMNS:
+        if col not in output.columns:
+            output[col] = ""
+    output = output[AUDIT_COLUMNS]
+    if google_sheets_enabled():
+        write_google_sheet(GSHEET_AUDIT_TAB, AUDIT_COLUMNS, output)
+    output.to_csv(AUDIT_FILE, index=False, encoding="utf-8-sig")
+
+
 def ensure_files() -> None:
     if not USER_FILE.exists():
-        default_user = pd.DataFrame([
-            {
-                "user_id": "USER-DEFAULT",
-                "display_name": "Demo Business",
-                "entity_type": "Client Account",
-                "email": "",
-                "country_region": "United States",
-                "tax_id": "",
-                "industry": "Small Business",
-                "base_currency": "USD",
-                "opening_balance": 0.0,
-                "notes": "Default demo account",
-                "created_at": now_str(),
-                "updated_at": now_str(),
-            }
-        ], columns=USER_COLUMNS)
-        default_user.to_csv(USER_FILE, index=False, encoding="utf-8-sig")
+        default_user_df().to_csv(USER_FILE, index=False, encoding="utf-8-sig")
     if not TRANSACTION_FILE.exists():
         pd.DataFrame(columns=TRANSACTION_COLUMNS).to_csv(TRANSACTION_FILE, index=False, encoding="utf-8-sig")
     if not AUDIT_FILE.exists():
         pd.DataFrame(columns=AUDIT_COLUMNS).to_csv(AUDIT_FILE, index=False, encoding="utf-8-sig")
 
+    # When Google Sheets is configured, create the required cloud tables and
+    # seed the user table once.  Runtime data is then read from/written to the
+    # cloud sheet so Streamlit restarts or redeploys do not wipe the ledger.
+    if google_sheets_enabled():
+        users_cloud = read_google_sheet(GSHEET_USERS_TAB, USER_COLUMNS)
+        if users_cloud is not None and users_cloud.empty:
+            try:
+                local_users = pd.read_csv(USER_FILE, dtype={"user_id": str})
+            except Exception:
+                local_users = pd.DataFrame(columns=USER_COLUMNS)
+            write_google_sheet(GSHEET_USERS_TAB, USER_COLUMNS, local_users if not local_users.empty else default_user_df())
+
+        tx_cloud = read_google_sheet(GSHEET_TRANSACTIONS_TAB, TRANSACTION_COLUMNS)
+        if tx_cloud is not None and tx_cloud.empty:
+            try:
+                local_tx = pd.read_csv(TRANSACTION_FILE, dtype={"transaction_id": str, "user_id": str})
+            except Exception:
+                local_tx = pd.DataFrame(columns=TRANSACTION_COLUMNS)
+            if not local_tx.empty:
+                write_google_sheet(GSHEET_TRANSACTIONS_TAB, TRANSACTION_COLUMNS, local_tx)
+
+        audit_cloud = read_google_sheet(GSHEET_AUDIT_TAB, AUDIT_COLUMNS)
+        if audit_cloud is not None and audit_cloud.empty:
+            try:
+                local_audit = pd.read_csv(AUDIT_FILE)
+            except Exception:
+                local_audit = pd.DataFrame(columns=AUDIT_COLUMNS)
+            if not local_audit.empty:
+                write_google_sheet(GSHEET_AUDIT_TAB, AUDIT_COLUMNS, local_audit)
+
 
 def read_users() -> pd.DataFrame:
     ensure_files()
-    try:
-        df = pd.read_csv(USER_FILE, dtype={"user_id": str})
-    except Exception:
-        df = pd.DataFrame(columns=USER_COLUMNS)
+    if google_sheets_enabled():
+        cloud_df = read_google_sheet(GSHEET_USERS_TAB, USER_COLUMNS)
+        if cloud_df is not None:
+            df = cloud_df
+        else:
+            try:
+                df = pd.read_csv(USER_FILE, dtype={"user_id": str})
+            except Exception:
+                df = pd.DataFrame(columns=USER_COLUMNS)
+    else:
+        try:
+            df = pd.read_csv(USER_FILE, dtype={"user_id": str})
+        except Exception:
+            df = pd.DataFrame(columns=USER_COLUMNS)
     for col in USER_COLUMNS:
         if col not in df.columns:
             df[col] = "" if col != "opening_balance" else 0.0
     df = df[USER_COLUMNS]
     df["opening_balance"] = pd.to_numeric(df["opening_balance"], errors="coerce").fillna(0.0)
     if df.empty:
-        USER_FILE.unlink(missing_ok=True)
-        ensure_files()
-        return read_users()
+        df = default_user_df()
+        save_users(df)
+    df.to_csv(USER_FILE, index=False, encoding="utf-8-sig")
     return df
 
 
@@ -322,7 +557,10 @@ def save_users(df: pd.DataFrame) -> None:
     for col in USER_COLUMNS:
         if col not in output.columns:
             output[col] = "" if col != "opening_balance" else 0.0
-    output[USER_COLUMNS].to_csv(USER_FILE, index=False, encoding="utf-8-sig")
+    output = output[USER_COLUMNS]
+    if google_sheets_enabled():
+        write_google_sheet(GSHEET_USERS_TAB, USER_COLUMNS, output)
+    output.to_csv(USER_FILE, index=False, encoding="utf-8-sig")
 
 
 def normalize_user_name(name: object) -> str:
@@ -342,6 +580,10 @@ def user_name_exists(users: pd.DataFrame, display_name: str, exclude_user_id: Op
 
 def read_audit_log() -> pd.DataFrame:
     ensure_files()
+    if google_sheets_enabled():
+        cloud_df = read_google_sheet(GSHEET_AUDIT_TAB, AUDIT_COLUMNS)
+        if cloud_df is not None:
+            return cloud_df
     try:
         return pd.read_csv(AUDIT_FILE)
     except Exception:
@@ -360,7 +602,7 @@ def log_audit(action: str, transaction_id: str, user_id: str, user_name: str, de
             "details": details,
         }
     ])
-    pd.concat([read_audit_log(), row], ignore_index=True).to_csv(AUDIT_FILE, index=False, encoding="utf-8-sig")
+    save_audit_log(pd.concat([read_audit_log(), row], ignore_index=True))
 
 
 def account_from_category(category: str) -> str:
@@ -435,6 +677,12 @@ def migrate_legacy_if_needed() -> None:
     migration for new installations.
     """
     ensure_files()
+
+    if google_sheets_enabled():
+        # In cloud mode, do not seed demo/legacy rows automatically.
+        # Real bookkeeping data must remain user-controlled and persistent in Google Sheets.
+        mark_legacy_migration_complete("google sheets cloud storage enabled")
+        return
 
     if MIGRATION_SENTINEL.exists():
         return
@@ -512,10 +760,20 @@ def migrate_legacy_if_needed() -> None:
 def read_transactions() -> pd.DataFrame:
     ensure_files()
     migrate_legacy_if_needed()
-    try:
-        df = pd.read_csv(TRANSACTION_FILE, dtype={"transaction_id": str, "user_id": str})
-    except Exception:
-        df = pd.DataFrame(columns=TRANSACTION_COLUMNS)
+    if google_sheets_enabled():
+        cloud_df = read_google_sheet(GSHEET_TRANSACTIONS_TAB, TRANSACTION_COLUMNS)
+        if cloud_df is not None:
+            df = cloud_df
+        else:
+            try:
+                df = pd.read_csv(TRANSACTION_FILE, dtype={"transaction_id": str, "user_id": str})
+            except Exception:
+                df = pd.DataFrame(columns=TRANSACTION_COLUMNS)
+    else:
+        try:
+            df = pd.read_csv(TRANSACTION_FILE, dtype={"transaction_id": str, "user_id": str})
+        except Exception:
+            df = pd.DataFrame(columns=TRANSACTION_COLUMNS)
     # Backward compatibility for older versions of this app.
     if "user" in df.columns and "user_name" not in df.columns:
         df["user_name"] = df["user"]
@@ -544,6 +802,7 @@ def read_transactions() -> pd.DataFrame:
         df["exchange_rate"] = pd.to_numeric(df["exchange_rate"], errors="coerce").fillna(1.0)
         df["base_amount"] = pd.to_numeric(df["base_amount"], errors="coerce").fillna(df["amount"] * df["exchange_rate"])
         df["tax_related"] = df["tax_related"].fillna(False).astype(str).str.lower().isin(["true", "1", "yes", "是"])
+    df.to_csv(TRANSACTION_FILE, index=False, encoding="utf-8-sig")
     return df
 
 
@@ -555,6 +814,8 @@ def save_transactions(df: pd.DataFrame) -> None:
     output = output[TRANSACTION_COLUMNS]
     if not output.empty:
         output["date"] = pd.to_datetime(output["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    if google_sheets_enabled():
+        write_google_sheet(GSHEET_TRANSACTIONS_TAB, TRANSACTION_COLUMNS, output)
     output.to_csv(TRANSACTION_FILE, index=False, encoding="utf-8-sig")
 
 
@@ -1035,7 +1296,7 @@ def gemini_extract_transaction(image_path: Path, api_key: str, active_user: pd.S
     except Exception as exc:
         raise RuntimeError("Missing google-generativeai or Pillow dependency") from exc
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.5-flash")
     allowed = {
         "types": ["Income", "Expense"],
         "income_accounts": TYPE_TO_ACCOUNTS["Income"],
@@ -1684,7 +1945,12 @@ def render_settings(df: pd.DataFrame, lang: str, active_user: pd.Series) -> None
                 st.error(t("import_error", lang))
     with c2:
         st.subheader(t("data_location", lang))
-        st.code(str(DATA_DIR))
+        if google_sheets_enabled():
+            st.success(t("cloud_connected", lang))
+            st.code(f"Google Sheets: {google_spreadsheet_id()}")
+        else:
+            st.warning(t("cloud_not_connected", lang))
+            st.code(str(DATA_DIR))
         if st.button(t("load_demo", lang), use_container_width=True):
             all_tx = read_transactions()
             all_tx = all_tx[all_tx["user_id"] != active_user["user_id"]]

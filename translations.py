@@ -300,3 +300,12 @@ TEXT.update({
 ACTION_LABELS.update({
     "AI_CAPTURE_TRANSACTION": {"zh-TW": "AI 圖片入帳", "zh-CN": "AI 图片入账", "en": "AI Image Capture Transaction"},
 })
+
+# Additional multilingual text for Google Sheets cloud persistence.
+TEXT.update({
+    "cloud_storage": {"zh-TW": "雲端資料儲存", "zh-CN": "云端数据储存", "en": "Cloud Data Storage"},
+    "cloud_connected": {"zh-TW": "已連線至 Google Sheets。所有帳戶、交易與稽核紀錄會寫入雲端。", "zh-CN": "已连接至 Google Sheets。所有账户、交易与稽核记录会写入云端。", "en": "Connected to Google Sheets. Accounts, transactions, and audit logs are saved to the cloud."},
+    "cloud_not_connected": {"zh-TW": "尚未連線 Google Sheets。部署後若只使用本機 CSV，重啟或更新可能造成資料遺失。", "zh-CN": "尚未连接 Google Sheets。部署后若只使用本地 CSV，重启或更新可能造成数据遗失。", "en": "Google Sheets is not connected. If the deployed app only uses local CSV files, data may be lost after restart or redeploy."},
+    "cloud_setup_hint": {"zh-TW": "請在 Streamlit Secrets 設定 google_sheets.spreadsheet_id 與 gcp_service_account。", "zh-CN": "请在 Streamlit Secrets 设置 google_sheets.spreadsheet_id 与 gcp_service_account。", "en": "Configure google_sheets.spreadsheet_id and gcp_service_account in Streamlit Secrets."},
+    "spreadsheet_id": {"zh-TW": "Google Sheet ID", "zh-CN": "Google Sheet ID", "en": "Google Sheet ID"},
+})
