@@ -284,6 +284,9 @@ def render_language_sidebar() -> str:
             st.success(t('cloud_connected', selected_lang))
             sid = google_spreadsheet_id() or ''
             st.caption(f"{t('spreadsheet_id', selected_lang)}: {sid[:8]}…")
+            err = st.session_state.get('cloud_storage_error', '')
+            if err:
+                st.warning(err[:220])
         else:
             st.warning(t('cloud_not_connected', selected_lang))
             err = st.session_state.get('cloud_storage_error', '')
@@ -407,31 +410,41 @@ def get_or_create_worksheet(title: str, columns: List[str]):
     spreadsheet = get_google_spreadsheet()
     if spreadsheet is None:
         return None
-    try:
-        worksheet = spreadsheet.worksheet(title)
-    except Exception:
-        worksheet = spreadsheet.add_worksheet(title=title, rows=1000, cols=max(20, len(columns)))
 
     try:
-        values = worksheet.get_all_values()
-    except Exception:
-        values = []
-
-    if not values:
         try:
-            worksheet.update(values=[columns], range_name="A1")
-        except TypeError:
-            worksheet.update("A1", [columns])
-    else:
-        header = values[0]
-        missing = [col for col in columns if col not in header]
-        if missing:
-            new_header = header + missing
+            worksheet = spreadsheet.worksheet(title)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=title, rows=1000, cols=max(20, len(columns)))
+
+        try:
+            values = worksheet.get_all_values()
+        except Exception:
+            values = []
+
+        if not values:
             try:
-                worksheet.update(values=[new_header], range_name="A1")
+                worksheet.update(values=[columns], range_name="A1")
             except TypeError:
-                worksheet.update("A1", [new_header])
-    return worksheet
+                worksheet.update("A1", [columns])
+        else:
+            header = values[0]
+            missing = [col for col in columns if col not in header]
+            if missing:
+                new_header = header + missing
+                try:
+                    worksheet.update(values=[new_header], range_name="A1")
+                except TypeError:
+                    worksheet.update("A1", [new_header])
+        st.session_state["cloud_storage_error"] = ""
+        return worksheet
+    except Exception as exc:
+        # Surface the real reason (permission denied, API not enabled, quota,
+        # wrong spreadsheet_id, etc.) instead of letting it crash the app.
+        st.session_state["cloud_storage_error"] = (
+            f"[{title}] {exc.__class__.__name__}: {exc}"
+        )
+        return None
 
 
 def read_google_sheet(title: str, columns: List[str]) -> Optional[pd.DataFrame]:
